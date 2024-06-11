@@ -63,20 +63,34 @@ type Raft struct {
 	// state a Raft server must maintain.
 	CurrentTerm int
 	IsLeader    bool
+	VotedFor    int                // candidateId that received vote in current term; null if none
+	Log         []LogEntry         // log entries;
+
+	CommitIndex int                // index of highest log entry known to be committed
+	LastApplied int                // index of highest log entry applied to state machine
+	
+	NextIndex   []int              // for each server, index of the next log entry to send to that server
+	MatchIndex  []int              // for each server, index of the highest log entry known to be replicated on server
 }
 
 // A Go object holding information about each log entry
 type LogEntry struct {
+	Command     string   // command for state machine
+	Term        int // term when entry was received by leader (first index is 1)
+	// Indicates the term in which the log entry was created. Terms are used to distinguish entries created in different election cycles.
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
 	// Your code here (2A).
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// mutex is unlocked when the surrounding GetState() returns
+	term = rf.CurrentTerm
+	isleader = rf.IsLeader
 
 	return term, isleader
 }
@@ -119,29 +133,53 @@ func (rf *Raft) readPersist(data []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term         int
-	CandidateId  string
-	LastLogIndex int
-	lastLogTerm  int
+	// This is what the candidate sends to the followers
+	Term         int    // candidate's term
+	CandidateId  string // candidate requesting vote
+	LastLogIndex int    // index of candidate's last log entry
+	LastLogTerm  int    // term of candidate's last log entry 
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (2A).
-	Term        int // current term of the server that received the vote request
-	VoteGranted bool
+	// This is what followers respond to the candidate with
+	Term        int  // current term of the server that received the vote request
+	VoteGranted bool // true means candidate received vote
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	currentTerm, isLeader := rf.GetState()
+	// rf: the voter / follower 
 	// Your code here (2A, 2B).
-	if args.Term < rf.GetState {
-		// reply false if the term in the vote request is less than the server's current term
+	rf.mu.Lock()
+	defer rf.mu.Unlock() // unlock when the surrounding function returns
+	
+	currentTerm, isLeader := rf.GetState()
+	reply.Term = currentTerm
+	if args.Term < currentTerm {
+		// reply false if the candidate has a lower term than the follower
 		reply.VoteGranted = false
+		return
 	}
-	// If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
+	
+	elif args.Term > currentTerm{
+		// if the candidate has a higher term than the follower
+		// update follower term 
+		rf.CurrentTerm = args.Term 
+		rf.VotedFor = -1 // haven't voted for anyone
+	}
+
+
+	// If votedFor is null or candidateId
+	if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId{
+		// If candidate’s log is at least as up-to-date as receiver’s log, grant vote
+		followerLastLogTerm := rf.Log[len(rf.Log) - 1].Term
+		if args.LastLogTerm >= followerLastLogTerm {
+			reply.VoteGranted = true
+		}
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
