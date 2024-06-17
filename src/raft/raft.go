@@ -18,8 +18,10 @@ package raft
 //
 
 import (
+	"math/rand"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"../labrpc"
 )
@@ -63,20 +65,20 @@ type Raft struct {
 	// state a Raft server must maintain.
 	CurrentTerm int
 	IsLeader    bool
-	VotedFor    int                // candidateId that received vote in current term; null if none
-	Log         []LogEntry         // log entries;
+	VotedFor    int        // candidateId that received vote in current term; null if none
+	Log         []LogEntry // log entries;
 
-	CommitIndex int                // index of highest log entry known to be committed
-	LastApplied int                // index of highest log entry applied to state machine
-	
-	NextIndex   []int              // for each server, index of the next log entry to send to that server
-	MatchIndex  []int              // for each server, index of the highest log entry known to be replicated on server
+	CommitIndex int // index of highest log entry known to be committed
+	LastApplied int // index of highest log entry applied to state machine
+
+	NextIndex  []int // for each server, index of the next log entry to send to that server
+	MatchIndex []int // for each server, index of the highest log entry known to be replicated on server
 }
 
 // A Go object holding information about each log entry
 type LogEntry struct {
-	Command     string   // command for state machine
-	Term        int // term when entry was received by leader (first index is 1)
+	Command string // command for state machine
+	Term    int    // term when entry was received by leader (first index is 1)
 	// Indicates the term in which the log entry was created. Terms are used to distinguish entries created in different election cycles.
 }
 
@@ -134,10 +136,10 @@ func (rf *Raft) readPersist(data []byte) {
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	// This is what the candidate sends to the followers
-	Term         int    // candidate's term
-	CandidateId  string // candidate requesting vote
-	LastLogIndex int    // index of candidate's last log entry
-	LastLogTerm  int    // term of candidate's last log entry 
+	Term         int // candidate's term
+	CandidateId  int // candidate requesting vote
+	LastLogIndex int // index of candidate's last log entry
+	LastLogTerm  int // term of candidate's last log entry
 }
 
 // example RequestVote RPC reply structure.
@@ -151,33 +153,34 @@ type RequestVoteReply struct {
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// rf: the voter / follower 
+	// rf: the voter / follower
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock() // unlock when the surrounding function returns
-	
+
 	currentTerm, isLeader := rf.GetState()
 	reply.Term = currentTerm
 	if args.Term < currentTerm {
 		// reply false if the candidate has a lower term than the follower
 		reply.VoteGranted = false
 		return
-	}
-	
-	elif args.Term > currentTerm{
+	} else if args.Term > currentTerm {
 		// if the candidate has a higher term than the follower
-		// update follower term 
-		rf.CurrentTerm = args.Term 
+		// update follower term
+		rf.CurrentTerm = args.Term
 		rf.VotedFor = -1 // haven't voted for anyone
 	}
 
-
 	// If votedFor is null or candidateId
-	if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId{
+	if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId {
 		// If candidate’s log is at least as up-to-date as receiver’s log, grant vote
-		followerLastLogTerm := rf.Log[len(rf.Log) - 1].Term
-		if args.LastLogTerm >= followerLastLogTerm {
+		followerLastLogIndex := len(rf.Log) - 1
+		followerLastLogTerm := rf.Log[followerLastLogIndex].Term
+		if args.LastLogTerm >= followerLastLogTerm ||
+			(args.LastLogTerm == followerLastLogTerm && args.LastLogIndex >= followerLastLogIndex) {
+			rf.VotedFor = args.CandidateId
 			reply.VoteGranted = true
+			return
 		}
 	}
 }
@@ -212,6 +215,96 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
+}
+
+type AppendEntriesArgs struct {
+	Term         int        // leader's term
+	LeaderId     int        // so followers can redirect clients
+	PrevLogIndex int        // index of log entry immediately preceding new ones
+	PrevLogTerm  int        // term of prevLogIndexEntry
+	Entries      []LogEntry // new log entries to store (empty for heartbeat; may send more than one for efficiency)
+	LeaderCommit int        // leader's commitIndex
+}
+
+type AppendEntriesReply struct {
+	Term    int  // leader's term
+	Success bool // true if follower contained entry matching prevLogIndex and
+}
+
+// AppendEntries RPC handler
+// invoked by leader to replicate log entries and used as heartbeat
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// 1. Reply false if term < currentTerm (§5.1)
+	if args.Term < rf.CurrentTerm {
+		// REMEMBER TO SEND BACK THE MOST RECENT TERM!
+		// So that the sender (leader) knows it's outdated
+		reply.Term = rf.CurrentTerm
+		reply.Success = false
+		return
+	}
+	// convert raft to follower if leader qualifies
+	if args.Term > rf.CurrentTerm {
+		rf.CurrentTerm = args.Term
+		rf.VotedFor = -1
+		// rf.persist()
+		rf.IsLeader = false
+	}
+
+	// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+	if len(rf.Log) <= args.PrevLogIndex || (rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+		// this can happen if the follower has a shorter log than the leader
+		// or there's a discrepancy in terms for the same index (which can happen when tehre's network partition etc)
+		reply.Term = rf.CurrentTerm
+		reply.Success = false
+		return
+	}
+
+	// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
+	for i := 0; i < len(args.Entries); i++ {
+		index := args.PrevLogIndex + 1 + i
+		if index < len(rf.Log) {
+			if rf.Log[index].Term != args.Entries[i].Term {
+				// delete all conflicting log and those following it
+				rf.Log = rf.Log[:index]
+				break
+			}
+		}
+	}
+
+	// 4. Append any new entries not already in the log
+	rf.Log = append(rf.Log[:args.PrevLogIndex+1], args.Entries...)
+
+	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+	if args.LeaderCommit > rf.CommitIndex {
+		rf.CommitIndex = min(args.LeaderCommit, len(rf.Log)-1)
+	}
+
+	rf.resetElectionTimeout()
+
+	reply.Term = rf.CurrentTerm
+	reply.Success = true
+	return
+}
+
+func (rf *Raft) resetElectionTimeout() {
+	// all raft nodes have a randomised election timeout 150ms - 300ms
+	// followers: reset election timeout when receiving heartbeats
+
+}
+
+func (rf *Raft) startElection() {
+	// On conversion to candidate, start election:
+	// Increment currentTerm
+	rf.CurrentTerm++
+	// Vote for self
+	rf.VotedFor = rf.me
+	// Reset election timer
+	// Send RequestVote RPCs to all other servers
+	// If votes received from majority of servers: become leader
+	// If AppendEntries RPC received from new leader: convert to follower
+	// If election timeout elapses: start new election
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -278,7 +371,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// This way a peer will learn who is the leader,
 	// if there is already a leader, or become the leader itself.
 	// Implement the RequestVote() RPC handler so that servers will vote for one another.
-	go sendRequestVote()
+
+	go func() {
+		time.Sleep(time.Duration(rand.Intn(150)+150) * time.Millisecond)
+	}()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
