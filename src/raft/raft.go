@@ -244,7 +244,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
-	// convert raft to follower if leader qualifies
+	// If RPC request or response contains term T > currentTerm:
+	// set currentTerm = T, convert to follower (§5.1)
 	if args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = -1
@@ -285,12 +286,33 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.CurrentTerm
 	reply.Success = true
+
+	//
 	return
+}
+
+func (rf *Raft) runElectionTimer() {
+	for {
+		rf.mu.Lock()
+		electionTimeout := rf.electionTimeout
+		rf.mu.Unlock()
+
+		time.Sleep(electionTimeout)
+
+		rf.mu.Lock()
+		if time.Since(rf.lastHeardFromLeader) >= rf.electionTimeout {
+			rf.startElection()
+		}
+		rf.mu.Unlock()
+	}
+
 }
 
 func (rf *Raft) resetElectionTimeout() {
 	// all raft nodes have a randomised election timeout 150ms - 300ms
 	// followers: reset election timeout when receiving heartbeats
+	rf.electionTimeout = time.Duration(rand.Intn(200)+300) * time.Millisecond
+	rf.lastHeardFromLeader = time.Now()
 
 }
 
@@ -381,3 +403,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	return rf
 }
+
+// for loop:
+// every raft sleep for a randomised time from 150 ms to 300 ms.
+// if it receives heartbeat, reset sleep for a randomised amount
+// else if there is an election timeout at the raft, call startElection
