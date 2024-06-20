@@ -455,8 +455,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 	// Your initialization code here (2A, 2B, 2C).
 
 	// Modify Make() to create a background goroutine that will kick off leader election
@@ -466,6 +464,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Implement the RequestVote() RPC handler so that servers will vote for one another.
 	
 	// put this into a background thread
+	rf.startElection()
 
 	go func() {
 		for {
@@ -482,17 +481,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				
 				if elapsed >= timeout {
 				rf.startElection()
-				}
-				time.Sleep(10 * time.Millisecond)
+				} 
 
 			case Leader:
-				rf.sendHeartbeat()
-				time.Sleep(50 * time.Millisecond)
-			}
+				
+
 		}
-	} ()
+	}
 
-
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
 
 	return rf
 }

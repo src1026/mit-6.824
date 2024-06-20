@@ -76,7 +76,6 @@ type Raft struct {
 
 	electionTimeout     time.Duration
 	lastHeardFromLeader time.Time
-	state       State
 }
 
 // A Go object holding information about each log entry
@@ -168,15 +167,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// reply false if the candidate has a lower term than the follower
 		reply.VoteGranted = false
 		return
-	} 
-	if args.Term > currentTerm {
+	} else if args.Term > currentTerm {
 		// if the candidate has a higher term than the follower
 		// update follower term
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = -1 // haven't voted for anyone
-		rf.state = Follower
-		rf.resetElectionTimeout()
-		return
 	}
 
 	// If votedFor is null or candidateId
@@ -187,11 +182,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if args.LastLogTerm >= followerLastLogTerm ||
 			(args.LastLogTerm == followerLastLogTerm && args.LastLogIndex >= followerLastLogIndex) {
 			rf.VotedFor = args.CandidateId
-			rf.resetElectionTimeout()
 			reply.VoteGranted = true
 			return
-		} else {
-			reply.VoteGranted = false
 		}
 	}
 }
@@ -327,17 +319,13 @@ func (rf *Raft) resetElectionTimeout() {
 }
 
 func (rf *Raft) startElection() {
-	ff.mu.Lock()
-	defer rf.mu.Unlock()
 	// On conversion to candidate, start election:
 	// Increment currentTerm
 	rf.CurrentTerm++
 	// Vote for self
 	rf.VotedFor = rf.me
-	rf.state = Candidate
 	// Reset election timer
 	rf.resetElectionTimeout()
-	// rf.persist()
 	// Send RequestVote RPCs to all other servers
 	argsLastLogIndex := len(rf.Log) - 1
 	argsLastLogTerm := rf.Log[len(rf.Log)-1].Term
@@ -347,55 +335,15 @@ func (rf *Raft) startElection() {
 		LastLogIndex: argsLastLogIndex,
 		LastLogTerm:  argsLastLogTerm,
 	}
-	votes := 1 // vote for self
-	// sending request vote to all neighbours 
-	for i := range rf.peers {
-		if i != rf.me {
-			go func(server int) {
-				reply := &RequestVoteReply{}
-				if rf.sendRequestVote(server, args, reply) {
-					rf.mu.Lock()
-					defer rf.mu.Unlock()
 
-					// check results in reply 
-					if reply.Term > args.Term {
-						// if receiving a 
-						rf.CurrentTerm = reply.Term
-						rf.state = Follower
-						rf.VotedFor = -1 
-						rf.resetElectionTimeout()
-						// rf.persist()
-						return
-					}
-
-					if reply.VoteGranted && rf.state == Candidate {
-						votes ++
-						// If votes received from majority of servers: become leader
-						if votes > len(rf.peers)/2 {
-							rf.state = Leader
-							rf.resetElectionTimeout()
-							rf.startLeader()
-						}
-					}
-
-				}
-			} (i) // passing i to the go func as server int
-		}
+	reply := &RequestVoteReply{
+		Term: 0,
 	}
-	
+	rf.RequestVote(args, reply)
+	rf.sendRequestVote(rf.me, args, reply)
+	// If votes received from majority of servers: become leader
 	// If AppendEntries RPC received from new leader: convert to follower
-
-
-
 	// If election timeout elapses: start new election
-	go func() {
-		time.Sleep(rf.electionTimeout)
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		if rf.state == Candidate && time.Since(rf.lastHeardFromLeader) >= rf.electionTimeout {
-			rf.startElection()
-		}
-	}
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -455,8 +403,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 	// Your initialization code here (2A, 2B, 2C).
 
 	// Modify Make() to create a background goroutine that will kick off leader election
@@ -464,38 +410,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// This way a peer will learn who is the leader,
 	// if there is already a leader, or become the leader itself.
 	// Implement the RequestVote() RPC handler so that servers will vote for one another.
-	
-	// put this into a background thread
 
 	go func() {
-		for {
-			rf.mu.Lock()
-			state := rf.state
-			rf.mu.Unlock()
+		time.Sleep(time.Duration(rand.Intn(150)+150) * time.Millisecond)
+	}()
 
-			switch state {
-			case Follower, Candidate:
-				rf.mu.Lock()
-				elapsed := time.Since(rf.lastHeardFromLeader)
-				timeout := rf.electionTimeout
-				rf.mu.Unlock()
-				
-				if elapsed >= timeout {
-				rf.startElection()
-				}
-				time.Sleep(10 * time.Millisecond)
-
-			case Leader:
-				rf.sendHeartbeat()
-				time.Sleep(50 * time.Millisecond)
-			}
-		}
-	} ()
-
-
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
 
 	return rf
 }
 
+// for loop:
+// every raft sleep for a randomised time from 150 ms to 300 ms.
 // if it receives heartbeat, reset sleep for a randomised amount
 // else if there is an election timeout at the raft, call startElection

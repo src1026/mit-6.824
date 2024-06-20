@@ -386,7 +386,7 @@ func (rf *Raft) startElection() {
 	// If AppendEntries RPC received from new leader: convert to follower
 
 
-
+	
 	// If election timeout elapses: start new election
 	go func() {
 		time.Sleep(rf.electionTimeout)
@@ -455,8 +455,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 	// Your initialization code here (2A, 2B, 2C).
 
 	// Modify Make() to create a background goroutine that will kick off leader election
@@ -464,38 +462,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// This way a peer will learn who is the leader,
 	// if there is already a leader, or become the leader itself.
 	// Implement the RequestVote() RPC handler so that servers will vote for one another.
-	
-	// put this into a background thread
 
 	go func() {
-		for {
-			rf.mu.Lock()
-			state := rf.state
-			rf.mu.Unlock()
+		time.Sleep(time.Duration(rand.Intn(150)+150) * time.Millisecond)
+	}()
 
-			switch state {
-			case Follower, Candidate:
-				rf.mu.Lock()
-				elapsed := time.Since(rf.lastHeardFromLeader)
-				timeout := rf.electionTimeout
-				rf.mu.Unlock()
-				
-				if elapsed >= timeout {
-				rf.startElection()
-				}
-				time.Sleep(10 * time.Millisecond)
-
-			case Leader:
-				rf.sendHeartbeat()
-				time.Sleep(50 * time.Millisecond)
-			}
-		}
-	} ()
-
-
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
 
 	return rf
 }
 
+// for loop:
+// every raft sleep for a randomised time from 150 ms to 300 ms.
 // if it receives heartbeat, reset sleep for a randomised amount
 // else if there is an election timeout at the raft, call startElection
